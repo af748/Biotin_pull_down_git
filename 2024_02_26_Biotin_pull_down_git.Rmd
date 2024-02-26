@@ -77,9 +77,7 @@ Convert to an MsnSet
 
 *A `MsnSet` is a proteomics-specific data structure, with functions available for standard proteomics workflows. It's since been deprecated and replaced by `Qfeatures`, which allows multiple levels of quantification to be stored in the same object, with details about how the features in each level are linked. Nonetheless, a `MsnSet` is still a sensible data structure to use for proteomics data. Many `camprotR` functions have been written explicitly to work with `MsnSets`, for example `plot_quant` in the code block after this.*
 
-```{r}
-feature_data  %>% filter(Master.Protein.Accessions=='P02533; P08727')
-```
+=
 
 ```{r}
 #select columns with the word "abundance" in.
@@ -282,7 +280,7 @@ filtered_exprs_lna <- lfq_protein_tidy_lna %>%
 # replicate vectors, so long as we re-order lfq_protein using the exprs matrix
 # column names first
 treatment <- pData(lfq_protein[,colnames(filtered_exprs_lna)])$Condition
-treatment <- factor(treatment, levels = c('NCL', 'CL'))
+treatment <- factor(treatment, levels = c('CL', 'NCL'))
 
 limma_design_lna <- model.matrix(formula(~treatment))
 
@@ -327,12 +325,12 @@ hist(deqms_results_lna$sca.P.Value)
 
 ```{r}
 
-table(deqms_results_lna$sca.adj.pva<0.05)
+table(deqms_results_lna$sca.adj.pva<0.1)
 
 deqms_results_lna %>% filter(logFC>0) %>% head()
 
 deqms_results_lna %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
   geom_point() +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
@@ -374,7 +372,7 @@ filtered_exprs_ion <- lfq_protein_tidy_ion %>%
 # replicate vectors, so long as we re-order lfq_protein using the exprs matrix
 # column names first
 treatment <- pData(lfq_protein[,colnames(filtered_exprs_ion)])$Condition
-treatment <- factor(treatment, levels = c('NCL', 'CL'))
+treatment <- factor(treatment, levels = c('CL', 'NCL'))
 
 limma_design_ion <- model.matrix(formula(~treatment))
 
@@ -420,12 +418,12 @@ hist(deqms_results_ion$sca.P.Value)
 
 ```{r}
 
-table(deqms_results_ion$sca.adj.pva<0.05)
+table(deqms_results_ion$sca.adj.pva<0.1)
 
 deqms_results_ion %>% filter(logFC>0) %>% head()
 
 deqms_results_ion %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
   geom_point() +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
@@ -462,7 +460,7 @@ filtered_exprs_veh <- lfq_protein_tidy_veh %>%
 # replicate vectors, so long as we re-order lfq_protein using the exprs matrix
 # column names first
 treatment <- pData(lfq_protein[,colnames(filtered_exprs_veh)])$Condition
-treatment <- factor(treatment, levels = c('NCL', 'CL'))
+treatment <- factor(treatment, levels = c('CL', 'NCL'))
 
 limma_design_veh <- model.matrix(formula(~treatment))
 
@@ -507,12 +505,12 @@ hist(deqms_results_veh$sca.P.Value)
 
 ```{r}
 
-table(deqms_results_veh$sca.adj.pva<0.05)
+table(deqms_results_veh$sca.adj.pva<0.1)
 
 deqms_results_veh %>% filter(logFC>0) %>% head()
 
 deqms_results_veh %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
   geom_point() +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
@@ -564,7 +562,7 @@ pheno_data2<- rownames_to_column(pData(lfq_protein[,colnames(filtered_exprs_ion_
 pheno_data2 <- pheno_data2 %>% separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) 
 
 treatment2 <- pheno_data2$Treatment
-treatment2 <- factor(treatment2, levels = c('LNA', 'ION'))
+treatment2 <- factor(treatment2, levels = c('ION', 'LNA'))
 replicate <- pheno_data2$Replicate
 
 limma_design_ion_lna_cl <- model.matrix(formula(~replicate+treatment2))
@@ -617,7 +615,7 @@ table(deqms_results_ion_lna_cl$sca.adj.pva<0.1)
 deqms_results_ion_lna_cl %>% filter(logFC>0) %>% head()
 
 deqms_results_veh %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
   geom_point() +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'ION vs LNA Sig.') +
@@ -713,12 +711,12 @@ hist(deqms_results_lna_veh_cl$sca.P.Value)
 
 ```{r}
 
-table(deqms_results_lna_veh_cl$sca.adj.pva<0.05)
+table(deqms_results_lna_veh_cl$sca.adj.pva<0.1)
 
 deqms_results_lna_veh_cl %>% filter(logFC>0) %>% head()
 
 deqms_results_lna_veh_cl %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
   geom_point() +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'LNA vs VEH Sig.') +
@@ -727,7 +725,7 @@ deqms_results_lna_veh_cl %>%
 
 
 
----------------------IONv VEH--------------------------
+---------------------ION_CLv VEH_CL--------------------------
 
 Let's visualise the abundance distributions of the samples in question.
 ```{r}
