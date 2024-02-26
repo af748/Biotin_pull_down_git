@@ -1,0 +1,831 @@
+---
+title: "2024_02_26_ASO_Biotin_pulldown_Data_processing_git"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(MSnbase)
+library(biobroom)
+library(camprotR)
+library(Proteomics.analysis.data)
+library(dplyr)
+library(tidyr)
+library(here)
+library(DEqMS)
+library(limma)
+library(broom)
+
+
+```
+
+Input data.
+
+*We'll start by reading in the data to a data.frame, which is a generic data.structure, suitable for any data table. This is the required input for `CamprotR::parse_features` and allows us to perform manual filtering with e.g `dplyr` easily*
+
+```{r}
+pep_data <- read.delim(here("2024_02_13_Peptide_data.txt"))
+
+```
+
+filter crap proteins
+
+```{r}
+crap_fasta_inf <-here('2023_02_CCP_cRAP.fasta.gz')
+
+# Load the cRAP FASTA used for the PD search
+crap_fasta <- Biostrings::fasta.index(crap_fasta_inf, seqtype = "AA")
+
+# Extract the UniProt accessions associated with each cRAP protein
+crap_accessions <- crap_fasta %>%
+  pull(desc) %>%
+  stringr::str_extract_all(pattern="(?<=\\|).*?(?=\\|)") %>%
+  unlist()
+```
+
+```{r}
+pep_data_flt <- camprotR::parse_features(
+  pep_data,
+  level = 'peptide',
+  crap_proteins = crap_accessions,
+  unique_master = FALSE
+)
+
+
+#level = 'peptide': This parameter specifies that you're interested in parsing peptide-level features from pep_data.
+#crap_proteins = crap_accessions: This parameter seems to specify a vector (crap_accessions) containing protein accessions that are considered contaminants or irrelevant for your analysis. The function likely filters out peptides associated with these proteins.
+```
+
+Filter for unique master proteins
+
+```{r}
+pep_data_flt <- pep_data_flt %>% filter(!grepl(';', Master.Protein.Accessions))
+camprotR:::message_parse(pep_data_flt, 'Master.Protein.Accessions', "features with non-unique master proteins removed")
+```
+
+```{r}
+sample_data <-read.csv("Sample_data.csv")
+
+# Displaying the table in a nicer format
+knitr::kable(sample_data,
+             align = "cccc",
+             format = "html",
+             table.attr = "style='width:30%;'")
+```
+
+Convert to an MsnSet
+
+*A `MsnSet` is a proteomics-specific data structure, with functions available for standard proteomics workflows. It's since been deprecated and replaced by `Qfeatures`, which allows multiple levels of quantification to be stored in the same object, with details about how the features in each level are linked. Nonetheless, a `MsnSet` is still a sensible data structure to use for proteomics data. Many `camprotR` functions have been written explicitly to work with `MsnSets`, for example `plot_quant` in the code block after this.*
+
+```{r}
+feature_data  %>% filter(Master.Protein.Accessions=='P02533; P08727')
+```
+
+```{r}
+#select columns with the word "abundance" in.
+exprs_data <- pep_data_flt %>%
+  select(matches("Abundance..F.*")) %>%
+  as.matrix()
+
+# check the order of the samples. They appear to be ordered as rep1-3 for each condition.
+# If the replicate detail is important, e.g performed on separate days, it would be
+# prudent to check with Sandip if they were indeed all run in order rep1-3.
+# He should have shared an InputFiles.txt file which will specify the full sample name for each run,
+# which would hopefully detail the replicate number
+print(colnames(exprs_data))
+
+# Remove the unwanted part of the column name
+colnames(exprs_data) <- gsub('Abundance...*..Sample..', '', colnames(exprs_data))
+
+# Add the replicate number
+colnames(exprs_data) <- paste(colnames(exprs_data), rep(c(1,2,3), 6), sep='_')
+
+# Create data.frame with sample metadata (pData)
+#takes sample data and selects every column without "file" in the name, then creates a tibble with the rownames as the column "sample"
+pheno_data <- sample_data %>%
+  select(-File) %>%
+  tibble::column_to_rownames(var = "Sample")
+
+
+# Reorder the phenotype data to be in the same order as the exprs matrix
+# Example dataframe
+
+# Define the desired order of columns
+desired_order <- c("CL_ION_1","CL_ION_2","CL_ION_3", "CL_LNA_1","CL_LNA_2","CL_LNA_3", "CL_VEH_1","CL_VEH_2","CL_VEH_3","NCL_ION_1","NCL_ION_2","NCL_ION_3", "NCL_LNA_1","NCL_LNA_2","NCL_LNA_3", "NCL_VEH_1","NCL_VEH_2","NCL_VEH_3")
+
+# Subset the dataframe with the desired column order
+pheno_data <- pheno_data[desired_order,]
+
+
+
+# Create data.frame with peptide metadata (fData)
+# select all columns except those with abundance in the name.
+feature_data <- pep_data_flt %>%
+  # This retains all columns except the abundance columns. We don't really need most columns
+  #select(-matches("Abundance")) 
+  # This just retains the useful columns
+  select(Annotated.Sequence, Modifications, Protein.Accessions, Master.Protein.Accessions)
+
+
+# Create MSnSet
+pep <- MSnbase::MSnSet(exprs = exprs_data,
+                       fData = feature_data,
+                       pData = pheno_data)
+
+
+```
+
+
+Let's QC the peptides
+
+```{r}
+pep %>%
+  log(base = 2) %>%
+  camprotR::plot_quant(method = 'box')
+```
+
+let's look at some cool peptide intensities
+
+```{r}
+pep %>%
+  log(base = 2) %>%
+  camprotR::plot_quant(method = 'density') +
+  scale_colour_manual(values=rep(get_cat_palette(6), each=3))
+```
+
+```{r}
+p <- MSnbase::plotNA(pep, pNA = 0) +
+  camprotR::theme_camprot(border = FALSE, base_family = 'sans', base_size = 10) +
+  labs(x = 'Peptide index')
+```
+
+*naniar::gg_miss_upset is a generic function, not one specifically for proteomics data. As such, it was designed to take a data.frame() with just numeric columns. Hence we extract the exprs matrix from the MsnSet and convert to a data.frame*
+
+```{r}
+missing_data <- pep %>%
+  exprs() %>%
+  data.frame()
+
+naniar::gg_miss_upset(missing_data,
+                      sets = paste0(colnames(pep), '_NA'),
+                      keep.order = TRUE,
+                      nsets = 10)
+```
+
+I Don't think we need to do any normalising to peptide intensities because we didn't inject the same amount of peptide, it's a pulldown.
+
+Let's do some summarising to protein-level abundances
+
+*Relaxing max NA to 2/3 and reducing min peptides per protein to 2 (from 3) doubles the retained peptides to \~2000.*
+
+```{r}
+
+pep_restricted <- pep %>%
+  # Maximum 2/3 missing values
+  MSnbase::filterNA(pNA = 2/3) %>% # With 18 sample, allowing missing in 12 seems reasonable to me.
+
+  # At least two peptides per protein
+  camprotR::restrict_features_per_protein(min_features = 2, plot = FALSE) %>%
+
+  # Repeat the filtering since restrict_features_per_protein will replace some values with NA
+  MSnbase::filterNA(pNA = 2/3) %>%
+
+  camprotR::restrict_features_per_protein(min_features = 2, plot = FALSE)
+```
+
+```{r}
+p <- MSnbase::plotNA(pep_restricted, pNA = 0) +
+  camprotR::theme_camprot(border = FALSE, base_family = 'sans', base_size = 15) +
+  labs(x = 'Peptide index')
+```
+
+*Warning message re missing values can be safely ignored here. `MSnbase::combineFeatures` doesn't do any sanity checking that NA values are being appropriately handled and gives this warning so the onus is on the user to know what they are doing. `method='robust'` can handle NA values appropriately. Any proteins with NA value following this will be because the model could not estimate protein abundance from the peptide abundance. For example, in the following table, where X = peptide quantified, the protein cannot be quantified in sample A, since the peptides quantified in sample A are not quantified in any other sample. This is why we need to pre-filter the peptides to only retain the most informative ones*
+
+|      | A   | B   | C   | D   |
+|------|-----|-----|-----|-----|
+| pep1 | X   |     |     |     |
+| pep2 |     | X   | X   | X   |
+| pep3 | X   |     |     |     |
+| pep4 |     | X   | X   | X   |
+
+```{r}
+
+prot_robust <- pep_restricted %>%
+  log(base=2) %>%
+  MSnbase::combineFeatures(
+    # group the peptides by their master protein id
+    groupBy = fData(pep_restricted)$Master.Protein.Accessions,
+    method = 'robust',
+    maxit = 1000  # Ensures convergence for MASS::rlm
+  )
+
+```
+
+```{r}
+p <- MSnbase::plotNA(prot_robust, pNA = 0) +
+  camprotR::theme_camprot(border = FALSE, base_family = 'sans', base_size = 15)
+```
+
+```{r}
+naniar::gg_miss_upset(data.frame(exprs(prot_robust)),
+                      sets = paste0(colnames(prot_robust), '_NA'),
+                      keep.order = TRUE,
+                      nsets = 10)
+```
+
+```{r}
+saveRDS(prot_robust, 'lfq_prot_robust.rds')
+```
+
+Shall we do some statistical testing?
+
+Load in the QC'd LFQ data from the rds from before
+
+```{r}
+lfq_protein <- readRDS('lfq_prot_robust.rds')
+```
+
+*We need to convert the data structure from MsnSet to a data.frame to make it easy to filter to proteins with at least two replicate with quantification values for each set of samples. It would be possible to do this with the MsnSet, though I think it would prove pretty painful*
+
+Note, code below is an example for how to test CL vs NC for the 6 LNA samples.
+If you are performing many different comparisons, it may make sense to create a function(s) for some of this
+to avoid repeating the same code and having lots of similarly named objects around. I've indicated the most obvious parts where functions could be written.
+ - 
+ - adding the counts to the limma object
+
+---------------------Test LNA CL vs NCL data--------------------------
+
+
+```{r}
+
+lfq_protein_tidy_lna <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  subset(sample=="NCL_LNA_1"| sample=="NCL_LNA_2" | sample=="NCL_LNA_3" | sample=="CL_LNA_1"| sample=="CL_LNA_2" | sample=="CL_LNA_3") %>%
+  filter(is.finite(value)) %>%
+  group_by(protein, Condition) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Condition))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_lna <- lfq_protein_tidy_lna %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+treatment <- pData(lfq_protein[,colnames(filtered_exprs_lna)])$Condition
+treatment <- factor(treatment, levels = c('NCL', 'CL'))
+
+limma_design_lna <- model.matrix(formula(~treatment))
+
+limma_fit_lna <- lmFit(filtered_exprs_lna, limma_design_lna)
+limma_fit_lna <- eBayes(limma_fit_lna, trend=TRUE)
+
+limma::plotSA(limma_fit_lna)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_lna <- filtered_exprs_lna %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_lna <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_lna, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_lna$count <- min_pep_count_lna$min_pep_count
+
+efit_deqms_lna <- suppressWarnings(spectraCounteBayes(limma_fit_lna))
+
+VarianceBoxplot(efit_deqms_lna, n = 30, xlab = "Peptides")
+
+deqms_results_lna <- outputResult(efit_deqms_lna, coef_col=2)
+```
+
+
+```{r}
+hist(deqms_results_lna$P.Value)
+hist(deqms_results_lna$sca.P.Value)
+
+```
+
+
+```{r}
+
+table(deqms_results_lna$sca.adj.pva<0.05)
+
+deqms_results_lna %>% filter(logFC>0) %>% head()
+
+deqms_results_lna %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
+  labs(x = 'LNA CL/NCL', y = '-log10(p-value)')
+```
+
+
+
+
+
+---------------------Test ION CL vs NCL data--------------------------
+
+
+```{r}
+
+lfq_protein_tidy_ion <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  subset(sample=="NCL_ION_1"| sample=="NCL_ION_2" | sample=="NCL_ION_3" | sample=="CL_ION_1"| sample=="CL_ION_2" | sample=="CL_ION_3") %>%
+  # TS: would be best to have a column in the pData which describes the VEH/LNA/ION variable, so you can just filter using that column
+  subset(sample %in% c("NCL_ION_1", "NCL_ION_2", "NCL_ION_3", "CL_ION_1", "CL_ION_2", "CL_ION_3")) %>%
+  filter(is.finite(value)) %>%
+  group_by(protein, Condition) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Condition))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_ion <- lfq_protein_tidy_ion %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+treatment <- pData(lfq_protein[,colnames(filtered_exprs_ion)])$Condition
+treatment <- factor(treatment, levels = c('NCL', 'CL'))
+
+limma_design_ion <- model.matrix(formula(~treatment))
+
+limma_fit_ion <- lmFit(filtered_exprs_ion, limma_design_ion)
+limma_fit_ion <- eBayes(limma_fit_ion, trend=TRUE)
+
+limma::plotSA(limma_fit_ion)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_ion <- filtered_exprs_ion %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_ion <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_ion, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_ion$count <- min_pep_count_ion$min_pep_count
+
+efit_deqms_ion <- suppressWarnings(spectraCounteBayes(limma_fit_ion))
+
+VarianceBoxplot(efit_deqms_ion, n = 30, xlab = "Peptides")
+
+deqms_results_ion <- outputResult(efit_deqms_ion, coef_col=2)
+```
+
+
+```{r}
+hist(deqms_results_ion$P.Value)
+hist(deqms_results_ion$sca.P.Value)
+
+```
+
+
+
+```{r}
+
+table(deqms_results_ion$sca.adj.pva<0.05)
+
+deqms_results_ion %>% filter(logFC>0) %>% head()
+
+deqms_results_ion %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
+  labs(x = 'ION CL/NCL', y = '-log10(p-value)')
+```
+
+
+---------------------Test VEH CL vs NCL data--------------------------
+
+
+```{r}
+
+lfq_protein_tidy_veh <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  subset(sample=="NCL_VEH_1"| sample=="NCL_VEH_2" | sample=="NCL_VEH_3" | sample=="CL_VEH_1"| sample=="CL_VEH_2" | sample=="CL_VEH_3") %>%
+  filter(is.finite(value)) %>%
+  group_by(protein, Condition) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Condition))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_veh <- lfq_protein_tidy_veh %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+treatment <- pData(lfq_protein[,colnames(filtered_exprs_veh)])$Condition
+treatment <- factor(treatment, levels = c('NCL', 'CL'))
+
+limma_design_veh <- model.matrix(formula(~treatment))
+
+limma_fit_veh <- lmFit(filtered_exprs_veh, limma_design_veh)
+limma_fit_veh <- eBayes(limma_fit_veh, trend=TRUE)
+
+limma::plotSA(limma_fit_veh)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_veh <- filtered_exprs_veh %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_veh <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_veh, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_veh$count <- min_pep_count_veh$min_pep_count
+
+efit_deqms_veh <- suppressWarnings(spectraCounteBayes(limma_fit_veh))
+
+VarianceBoxplot(efit_deqms_veh, n = 30, xlab = "Peptides")
+
+deqms_results_veh <- outputResult(efit_deqms_veh, coef_col=2)
+```
+
+
+```{r}
+hist(deqms_results_veh$P.Value)
+hist(deqms_results_veh$sca.P.Value)
+
+```
+
+
+```{r}
+
+table(deqms_results_veh$sca.adj.pva<0.05)
+
+deqms_results_veh %>% filter(logFC>0) %>% head()
+
+deqms_results_veh %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'CL vs NCL Sig.') +
+  labs(x = 'VEH_CL/NCL', y = '-log10(p-value)')
+```
+
+
+
+---------------------Test ION CL vs LNA CL data--------------------------
+
+Let's visualise the abundance distributions of the samples in question.
+```{r}
+plot_quant(lfq_protein[,grepl('^CL_(ION|LNA)_\\d', colnames(lfq_protein))], method='density') +
+  scale_colour_manual(values=rep(get_cat_palette(2), each=3))
+plot_quant(lfq_protein[,grepl('^CL_(ION|LNA)_\\d', colnames(lfq_protein))], method='box')
+```
+
+
+
+```{r}
+lfq_protein_tidy_ION_LNA <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  filter(grepl('^CL_(ION|LNA)_\\d', sample)) %>%
+  separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) %>%
+  filter(is.finite(value)) %>%
+  group_by(protein) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Treatment))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_ion_lna_cl <- lfq_protein_tidy_ION_LNA %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+
+library(tibble)
+
+pheno_data2<- rownames_to_column(pData(lfq_protein[,colnames(filtered_exprs_ion_lna_cl)]), var = "sample")
+pheno_data2 <- pheno_data2 %>% separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) 
+
+treatment2 <- pheno_data2$Treatment
+treatment2 <- factor(treatment2, levels = c('LNA', 'ION'))
+replicate <- pheno_data2$Replicate
+
+limma_design_ion_lna_cl <- model.matrix(formula(~replicate+treatment2))
+
+limma_fit_ion_lna_cl <- lmFit(filtered_exprs_ion_lna_cl, limma_design_ion_lna_cl)
+limma_fit_ion_lna_cl <- eBayes(limma_fit_ion_lna_cl, trend=TRUE)
+
+limma::plotSA(limma_fit_ion_lna_cl)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_ion_lna_cl <- filtered_exprs_ion_lna_cl %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_ion_lna_cl <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_ion_lna_cl, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_ion_lna_cl$count <- min_pep_count_ion_lna_cl$min_pep_count
+
+efit_deqms_ion_lna_cl <- suppressWarnings(spectraCounteBayes(limma_fit_ion_lna_cl))
+
+VarianceBoxplot(efit_deqms_ion_lna_cl, n = 30, xlab = "Peptides")
+
+head(coefficients(efit_deqms_ion_lna_cl))
+
+deqms_results_ion_lna_cl <- outputResult(efit_deqms_ion_lna_cl, coef_col=3)
+```
+
+
+```{r}
+hist(deqms_results_ion_lna_cl$P.Value)
+hist(deqms_results_ion_lna_cl$sca.P.Value)
+
+```
+
+
+```{r}
+
+table(deqms_results_ion_lna_cl$sca.adj.pva<0.1)
+
+deqms_results_ion_lna_cl %>% filter(logFC>0) %>% head()
+
+deqms_results_veh %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'ION vs LNA Sig.') +
+  labs(x = 'IonCL vs LNACL (Log2)', y = '-log10(p-value)')
+```
+
+
+-------------------------------------------------------------------------
+
+
+---------------------LNA v VEH--------------------------
+
+
+```{r}
+
+lfq_protein_tidy_LNA_VEH <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  filter(grepl('^CL_(LNA|VEH)_\\d', sample)) %>%
+  separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) %>%
+  filter(is.finite(value)) %>%
+  group_by(protein) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Treatment))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_lna_veh_cl <- lfq_protein_tidy_LNA_VEH %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+
+library(tibble)
+
+pheno_data2<- rownames_to_column(pData(lfq_protein[,colnames(filtered_exprs_lna_veh_cl)]), var = "sample")
+pheno_data2 <- pheno_data2 %>% separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) 
+
+treatment2 <- pheno_data2$Treatment
+treatment2 <- factor(treatment2, levels = c('LNA', 'VEH'))
+replicate <- pheno_data2$Replicate
+
+limma_design_lna_veh_cl <- model.matrix(formula(~replicate+treatment2))
+
+limma_fit_lna_veh_cl <- lmFit(filtered_exprs_lna_veh_cl, limma_design_lna_veh_cl)
+limma_fit_lna_veh_cl <- eBayes(limma_fit_lna_veh_cl, trend=TRUE)
+
+limma::plotSA(limma_fit_lna_veh_cl)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_lna_veh_cl <- filtered_exprs_lna_veh_cl %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_lna_veh_cl <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_lna_veh_cl, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_lna_veh_cl$count <- min_pep_count_lna_veh_cl$min_pep_count
+
+efit_deqms_lna_veh_cl <- suppressWarnings(spectraCounteBayes(limma_fit_lna_veh_cl))
+
+VarianceBoxplot(efit_deqms_lna_veh_cl, n = 30, xlab = "Peptides")
+
+head(coefficients(efit_deqms_lna_veh_cl))
+
+deqms_results_lna_veh_cl <- outputResult(efit_deqms_lna_veh_cl, coef_col=3)
+
+```
+
+
+```{r}
+hist(deqms_results_lna_veh_cl$P.Value)
+hist(deqms_results_lna_veh_cl$sca.P.Value)
+
+```
+
+
+```{r}
+
+table(deqms_results_lna_veh_cl$sca.adj.pva<0.05)
+
+deqms_results_lna_veh_cl %>% filter(logFC>0) %>% head()
+
+deqms_results_lna_veh_cl %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.05)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'LNA vs VEH Sig.') +
+  labs(x = 'LNACL vs VEHCL (Log2)', y = '-log10(p-value)')
+```
+
+
+
+---------------------IONv VEH--------------------------
+
+Let's visualise the abundance distributions of the samples in question.
+```{r}
+plot_quant(lfq_protein[,grepl('^CL_(ION|VEH)_\\d', colnames(lfq_protein))], method='density') +
+  scale_colour_manual(values=rep(get_cat_palette(2), each=3))
+plot_quant(lfq_protein[,grepl('^CL_(ION|VEH)_\\d', colnames(lfq_protein))], method='box')
+```
+
+
+
+```{r}
+
+lfq_protein_tidy_ION_VEH <- lfq_protein %>%
+  # make the MSnSet into 'tidy' format for further testing
+  biobroom::tidy.MSnSet(addPheno=TRUE) %>% # addPheno=TRUE adds the phenotype columns
+  filter(grepl('^CL_(ION|VEH)_\\d', sample)) %>%
+  separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) %>%
+  filter(is.finite(value)) %>%
+  group_by(protein) %>%
+  filter(n()>=2) %>% 
+  group_by(protein) %>%
+  filter(length(unique(Treatment))==2) %>%# n() is the length of the group
+  ungroup()
+
+  
+# This could be a function since it always be the same steps
+# make_expr_wide <- function(tidy_expr) {}
+filtered_exprs_ion_veh_cl <- lfq_protein_tidy_ION_VEH %>%
+  pivot_wider(names_from=sample, values_from=value, id_cols=protein) %>%
+  tibble::column_to_rownames('protein') %>%
+  as.matrix()
+
+# Since the column names for our filtered exprs matrix is in the same format as lfq_protein
+# we can still use the phenoData for lfq_protein to define the condition and
+# replicate vectors, so long as we re-order lfq_protein using the exprs matrix
+# column names first
+
+library(tibble)
+
+pheno_data2<- rownames_to_column(pData(lfq_protein[,colnames(filtered_exprs_ion_veh_cl)]), var = "sample")
+pheno_data2 <- pheno_data2 %>% separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) 
+
+treatment2 <- pheno_data2$Treatment
+treatment2 <- factor(treatment2, levels = c('ION', 'VEH'))
+replicate <- pheno_data2$Replicate
+
+limma_design_ion_veh_cl <- model.matrix(formula(~replicate+treatment2))
+
+limma_fit_ion_veh_cl <- lmFit(filtered_exprs_ion_veh_cl, limma_design_ion_veh_cl)
+limma_fit_ion_veh_cl <- eBayes(limma_fit_ion_veh_cl, trend=TRUE)
+
+limma::plotSA(limma_fit_ion_veh_cl)
+
+# The next two steps could be a function since they will always be the same
+# get_min_peptides <- function(filtered_wide_expr) {}
+filtered_lfq_protein_long_ion_veh_cl <- filtered_exprs_ion_veh_cl %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Master.Protein.Accessions') %>%
+  pivot_longer(cols=-Master.Protein.Accessions, values_to='abundance', names_to='sample') %>%
+  filter(is.finite(abundance)) # We only want to consider samples with a ratio quantified
+
+min_pep_count_ion_veh_cl <- camprotR::count_features_per_protein(pep) %>%
+  merge(filtered_lfq_protein_long_ion_veh_cl, by=c('Master.Protein.Accessions', 'sample')) %>%
+  
+  group_by(Master.Protein.Accessions) %>%
+  summarise(min_pep_count = min(n))
+###
+
+
+# add the min peptide count
+limma_fit_ion_veh_cl$count <- min_pep_count_ion_veh_cl$min_pep_count
+
+efit_deqms_ion_veh_cl <- suppressWarnings(spectraCounteBayes(limma_fit_ion_veh_cl))
+
+VarianceBoxplot(efit_deqms_ion_veh_cl, n = 30, xlab = "Peptides")
+
+head(coefficients(efit_deqms_ion_veh_cl))
+
+deqms_results_ion_veh_cl <- outputResult(efit_deqms_ion_veh_cl, coef_col=3)
+```
+
+
+```{r}
+hist(deqms_results_ion_veh_cl$P.Value)
+hist(deqms_results_ion_veh_cl$sca.P.Value)
+
+```
+
+```{r}
+
+table(deqms_results_ion_veh_cl$sca.adj.pva<0.1)
+
+deqms_results_ion_veh_cl %>% filter(logFC>0) %>% head()
+
+deqms_results_ion_veh_cl %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
+  geom_point() +
+  theme_camprot(border=FALSE, base_size=15) +
+  scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'ION vs VEH Sig.') +
+  labs(x = 'IONCL vs VEHCL (Log2)', y = '-log10(p-value)')
+```
