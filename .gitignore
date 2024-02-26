@@ -2,3 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# RDS files are not ammenable to version control since they are binary files.
+# No need to keep them under version control anyway if they are generated in
+# the notebooks
+*.rds

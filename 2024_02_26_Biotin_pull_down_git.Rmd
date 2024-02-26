@@ -711,7 +711,7 @@ hist(deqms_results_lna_veh_cl$sca.P.Value)
 
 ```{r}
 
-table(deqms_results_lna_veh_cl$sca.adj.pva<0.1)
+table(deqms_results_lna_veh_cl$sca.adj.pval<0.1)
 
 deqms_results_lna_veh_cl %>% filter(logFC>0) %>% head()
 
@@ -769,7 +769,7 @@ pheno_data2<- rownames_to_column(pData(lfq_protein[,colnames(filtered_exprs_ion_
 pheno_data2 <- pheno_data2 %>% separate(sample, into=c(NA, 'Treatment', NA), remove = FALSE) 
 
 treatment2 <- pheno_data2$Treatment
-treatment2 <- factor(treatment2, levels = c('ION', 'VEH'))
+treatment2 <- factor(treatment2, levels = c('VEH', 'ION'))
 replicate <- pheno_data2$Replicate
 
 limma_design_ion_veh_cl <- model.matrix(formula(~replicate+treatment2))
@@ -815,15 +815,31 @@ hist(deqms_results_ion_veh_cl$sca.P.Value)
 ```
 
 ```{r}
+p_threshold <- 0.1
+table(deqms_results_ion_veh_cl$sca.adj.pva<p_threshold)
 
-table(deqms_results_ion_veh_cl$sca.adj.pva<0.1)
-
-deqms_results_ion_veh_cl %>% filter(logFC>0) %>% head()
+deqms_results_ion_veh_cl %>% head()
 
 deqms_results_ion_veh_cl %>%
-  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < 0.1)) +
+  tibble::rownames_to_column('uniprotID') %>%
+  ggplot(aes(x = logFC, y = -log10(sca.P.Value), colour = sca.adj.pval < p_threshold)) +
   geom_point() +
+  ggrepel::geom_text_repel(aes(label=ifelse(sca.adj.pval<p_threshold, uniprotID, NA)), 
+                           show.legend=FALSE) +
   theme_camprot(border=FALSE, base_size=15) +
   scale_colour_manual(values = c('grey', get_cat_palette(2)[2]), name = 'ION vs VEH Sig.') +
   labs(x = 'IONCL vs VEHCL (Log2)', y = '-log10(p-value)')
 ```
+Checking protein level abundance for P67809 (YBX1) and P19338 (NCL)
+```{r, fig.height=3, fig.width=3}
+lfq_protein[c('P19338', 'P67809'),] %>%
+  tidy(addPheno=TRUE) %>%
+  separate(sample, into=c(NA, 'treatment', NA)) %>%
+  filter(treatment %in% c('ION', 'VEH'), Condition=='CL') %>%
+  ggplot(aes(factor(treatment, levels=c('VEH', 'ION')), value)) +
+  geom_point() +
+  theme_classic() +
+  labs(x='', y='Protein abundance') +
+  facet_wrap(~protein)
+```
+
